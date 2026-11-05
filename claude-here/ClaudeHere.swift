@@ -2,6 +2,8 @@
 //   • Double-tap ⌥ Option in Finder   → open Claude Code in a full-screen Terminal for the selected folder
 //   • Double-tap Right ⌘ Command       → drag over the screen; the screenshot is pasted straight into
 //                                        your open Claude Code session (Terminal)
+//   • Double-tap Right ⇧ Shift in Finder → Command Center copies the selected items to your external drive
+//   • Double-tap Left ⇧ Shift in Finder  → AirDrops the selected items straight to your iPhone
 // Pure macOS frameworks, no third-party dependencies.
 
 import Cocoa
@@ -14,6 +16,10 @@ let openKeys: Set<Int64> = [58, 61]
 let openFlag: CGEventFlags = .maskAlternate
 let shotKeys: Set<Int64> = [54]
 let shotFlag: CGEventFlags = .maskCommand
+let copyKeys: Set<Int64> = [60]               // Right Shift
+let copyFlag: CGEventFlags = .maskShift
+let dropKeys: Set<Int64> = [56]               // Left Shift
+let dropFlag: CGEventFlags = .maskShift
 // ------------------
 
 final class DoubleTap {
@@ -203,6 +209,131 @@ func pasteWhenTerminalIsFront(attempt: Int = 0) {
     }
 }
 
+// MARK: - 3. Quick Copy to T7 (handled by T7 Helper)
+
+func quickCopyToT7() {
+    guard frontBundleID() == "com.apple.finder" else { return }
+    let helperRunning = ["com.local.commandcenter", "com.local.t7helper"].contains {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty
+    }
+    guard helperRunning else { log("Quick Copy: Command Center isn't running"); NSSound.beep(); return }
+    DistributedNotificationCenter.default().postNotificationName(Notification.Name("com.local.t7helper.quickCopy"),
+                                                                 object: nil, userInfo: nil, deliverImmediately: true)
+    log("Quick Copy: asked Command Center to copy the Finder selection")
+}
+
+// MARK: - 4. AirDrop the Finder selection to your iPhone
+
+let finderSelectionScript = """
+tell application "Finder"
+  set out to ""
+  repeat with f in (selection as alias list)
+    set out to out & POSIX path of f & linefeed
+  end repeat
+  return out
+end tell
+"""
+
+final class AirDropDelegate: NSObject, NSSharingServiceDelegate {
+    func sharingService(_ s: NSSharingService, didShareItems items: [Any]) {
+        log("AirDrop: sent \(items.count) item(s)"); NSSound(named: "Glass")?.play()
+    }
+    func sharingService(_ s: NSSharingService, didFailToShareItems items: [Any], error: Error) {
+        log("AirDrop: failed — \(error.localizedDescription)")
+    }
+}
+let airDropDelegate = AirDropDelegate()
+var airDropService: NSSharingService?
+
+func airDropToIPhone() {
+    guard frontBundleID() == "com.apple.finder" else { return }
+    let urls = (runAppleScript(finderSelectionScript) ?? "").split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+    guard !urls.isEmpty else { NSSound.beep(); log("AirDrop: nothing selected in Finder"); return }
+    guard let svc = NSSharingService(named: .sendViaAirDrop), svc.canPerform(withItems: urls) else {
+        alert("AirDrop isn't available", "Turn on Wi-Fi and Bluetooth, and make sure AirDrop is enabled in Control Center.")
+        return
+    }
+    svc.delegate = airDropDelegate
+    airDropService = svc
+    NSApp.activate(ignoringOtherApps: true)
+    svc.perform(withItems: urls)
+    log("AirDrop: opened for \(urls.count) item(s)")
+    pressIPhoneWhenVisible()
+}
+
+/// Every element in an accessibility tree that has a visible label.
+func labeledElements(_ root: AXUIElement, depth: Int = 0, into out: inout [(AXUIElement, String)]) {
+    guard depth < 25, out.count < 400 else { return }
+    for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+        var v: CFTypeRef?
+        if AXUIElementCopyAttributeValue(root, attr as CFString, &v) == .success, let s = v as? String, !s.isEmpty {
+            out.append((root, s)); break
+        }
+    }
+    var kids: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(root, kAXChildrenAttribute as CFString, &kids) == .success,
+          let children = kids as? [AXUIElement] else { return }
+    for c in children { labeledElements(c, depth: depth + 1, into: &out) }
+}
+
+/// Presses the element, or the nearest pressable parent.
+func press(_ el: AXUIElement) -> Bool {
+    var cur: AXUIElement? = el
+    for _ in 0..<4 {
+        guard let e = cur else { return false }
+        if AXUIElementPerformAction(e, kAXPressAction as CFString) == .success { return true }
+        var parent: CFTypeRef?
+        cur = AXUIElementCopyAttributeValue(e, kAXParentAttribute as CFString, &parent) == .success ? (parent as! AXUIElement) : nil
+    }
+    return false
+}
+
+/// The AirDrop picker can live in our own process or in a system sharing helper — search both.
+func airDropRoots() -> [(AXUIElement, String)] {
+    var roots = [(AXUIElementCreateApplication(getpid()), "ClaudeHere")]
+    for app in NSWorkspace.shared.runningApplications {
+        let id = (app.bundleIdentifier ?? "").lowercased(), name = (app.localizedName ?? "").lowercased()
+        if id.contains("sharing") || id.contains("airdrop") || id.contains("sharesheet") || name.contains("airdrop") || name.contains("sharing") {
+            roots.append((AXUIElementCreateApplication(app.processIdentifier), app.bundleIdentifier ?? name))
+        }
+    }
+    return roots
+}
+
+/// Same name? Ignores case, straight-vs-curly apostrophes and anything after the first line (e.g. a status).
+func sameDeviceName(_ label: String, _ wanted: String) -> Bool {
+    func norm(_ s: String) -> String {
+        (s.components(separatedBy: .newlines).first ?? s).replacingOccurrences(of: "’", with: "'")
+            .trimmingCharacters(in: .whitespaces).lowercased()
+    }
+    return norm(label) == norm(wanted)
+}
+
+func pressIPhoneWhenVisible(attempt: Int = 0) {
+    // Only ever auto-sends to YOUR device, matched by exact name — never "any iPhone" nearby.
+    // Set it with: defaults write com.local.claudehere airdropDevice "Your iPhone's name"
+    guard let wanted = UserDefaults.standard.string(forKey: "airdropDevice"), !wanted.isEmpty else {
+        log("AirDrop: no airdropDevice set — choose the device in the AirDrop window"); return
+    }
+    var found: [(AXUIElement, String)] = []
+    var where_: [String] = []
+    for (root, name) in airDropRoots() {
+        var els: [(AXUIElement, String)] = []
+        labeledElements(root, into: &els)
+        if !els.isEmpty { where_.append(name) }
+        found += els
+    }
+    if let target = found.first(where: { sameDeviceName($0.1, wanted) }) {
+        if press(target.0) { log("AirDrop: sending to “\(target.1)”"); return }
+    }
+    if attempt == 8 || attempt == 24 {   // diagnostics: what the picker shows (labels only)
+        let labels = Set(found.map { $0.1 }).prefix(40).joined(separator: " | ")
+        log("AirDrop: looking for “\(wanted)” in [\(where_.joined(separator: ", "))] — labels: \(labels)")
+    }
+    if attempt < 48 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { pressIPhoneWhenVisible(attempt: attempt + 1) } }
+    else { log("AirDrop: couldn't find “\(wanted)” — pick it in the AirDrop window") }
+}
+
 // MARK: - Key listening
 
 let callback: CGEventTapCallBack = { _, type, event, _ in
@@ -249,12 +380,14 @@ func startTap() {
     eventTap = tap
     CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
     CGEvent.tapEnable(tap: tap, enable: true)
-    log("listening: double-tap ⌥ in Finder = open Claude, double-tap Right ⌘ = screenshot → Claude (screenRecording=\(CGPreflightScreenCaptureAccess()))")
+    log("listening: ⌥⌥ in Finder = open Claude, Right ⌘⌘ = screenshot → Claude, Right ⇧⇧ in Finder = copy to T7, Left ⇧⇧ in Finder = AirDrop to iPhone (screenRecording=\(CGPreflightScreenCaptureAccess()))")
 }
 
 triggers = [
     DoubleTap("⌥ → open Claude here", openKeys, openFlag, openClaudeHere),
     DoubleTap("Right ⌘ → screenshot to Claude", shotKeys, shotFlag, screenshotToClaude),
+    DoubleTap("Right ⇧ in Finder → copy to T7", copyKeys, copyFlag, quickCopyToT7),
+    DoubleTap("Left ⇧ in Finder → AirDrop to iPhone", dropKeys, dropFlag, airDropToIPhone),
 ]
 
 let app = NSApplication.shared
