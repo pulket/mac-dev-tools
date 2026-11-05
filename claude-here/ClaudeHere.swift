@@ -1,20 +1,50 @@
-// ClaudeHere — double-tap Right Option in Finder to open Claude Code
-// in a full-screen Terminal window for the selected folder.
+// ClaudeHere — two tiny shortcuts for Claude Code on macOS:
+//   • Double-tap ⌥ Option in Finder   → open Claude Code in a full-screen Terminal for the selected folder
+//   • Double-tap Right ⌘ Command       → drag over the screen; the screenshot is pasted straight into
+//                                        your open Claude Code session (Terminal)
 // Pure macOS frameworks, no third-party dependencies.
 
 import Cocoa
 import ApplicationServices
 
 // ---- Settings ----
-let triggerKeyCodes: Set<Int64> = [58, 61] // 58 = Left Option, 61 = Right Option (54/55 = Cmd, 59/62 = Control)
-let triggerFlag: CGEventFlags = .maskAlternate  // .maskCommand for Cmd, .maskControl for Control
 let doubleTapWindow: TimeInterval = 0.35  // max seconds between the two taps
+// Key codes: 58/61 = Left/Right Option, 55/54 = Left/Right Command, 59/62 = Left/Right Control
+let openKeys: Set<Int64> = [58, 61]
+let openFlag: CGEventFlags = .maskAlternate
+let shotKeys: Set<Int64> = [54]
+let shotFlag: CGEventFlags = .maskCommand
 // ------------------
 
-var keyIsDown = false
-var otherKeyPressed = false
-var lastTap: TimeInterval = 0
+final class DoubleTap {
+    let name: String, keys: Set<Int64>, flag: CGEventFlags, action: () -> Void
+    var isDown = false, otherKeyPressed = false, lastTap: TimeInterval = 0
+    init(_ name: String, _ keys: Set<Int64>, _ flag: CGEventFlags, _ action: @escaping () -> Void) {
+        self.name = name; self.keys = keys; self.flag = flag; self.action = action
+    }
+
+    func flagsChanged(_ code: Int64, _ flags: CGEventFlags) {
+        guard keys.contains(code) else { return }
+        let pressed = flags.contains(flag)
+        if pressed && !isDown {
+            isDown = true; otherKeyPressed = false
+        } else if !pressed && isDown {
+            isDown = false
+            if otherKeyPressed { lastTap = 0; return }   // used as a modifier (e.g. ⌘C), not a tap
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastTap < doubleTapWindow {
+                lastTap = 0
+                log("double-tap: \(name) (front app: \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"))")
+                DispatchQueue.main.async(execute: action)
+            }
+            else { lastTap = now }
+        }
+    }
+}
+
 var eventTap: CFMachPort?
+var triggers: [DoubleTap] = []
+var modifierLogBudget = 30
 
 let logURL = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/ClaudeHere.log")
 func log(_ msg: String) {
@@ -25,6 +55,29 @@ func log(_ msg: String) {
         try? line.write(to: logURL, atomically: true, encoding: .utf8)
     }
 }
+
+func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+func appleQuote(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+
+@discardableResult
+func runAppleScript(_ source: String) -> String? {
+    var err: NSDictionary?
+    let result = NSAppleScript(source: source)?.executeAndReturnError(&err)
+    if let err { log("AppleScript error: \(err)") }
+    return result?.stringValue
+}
+
+func frontBundleID() -> String { NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?" }
+func terminalRunning() -> Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").isEmpty }
+
+func alert(_ title: String, _ text: String) {
+    NSApp.activate(ignoringOtherApps: true)
+    let a = NSAlert(); a.messageText = title; a.informativeText = text; a.runModal()
+}
+
+// MARK: - 1. Open Claude in the selected Finder folder
 
 let finderPathScript = """
 tell application "Finder"
@@ -40,19 +93,6 @@ tell application "Finder"
 end tell
 """
 
-func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-func appleQuote(_ s: String) -> String {
-    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
-}
-
-@discardableResult
-func runAppleScript(_ source: String) -> String? {
-    var err: NSDictionary?
-    let result = NSAppleScript(source: source)?.executeAndReturnError(&err)
-    if let err { log("AppleScript error: \(err)") }
-    return result?.stringValue
-}
-
 func makeTerminalFullScreen(attempt: Int = 0) {
     guard let term = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first else { return }
     let axApp = AXUIElementCreateApplication(term.processIdentifier)
@@ -65,6 +105,7 @@ func makeTerminalFullScreen(attempt: Int = 0) {
 }
 
 func openClaudeHere() {
+    guard frontBundleID() == "com.apple.finder" else { return }
     guard let path = runAppleScript(finderPathScript) else { NSSound.beep(); return }
     log("opening Claude in \(path)")
     let cmd = "cd \(shellQuote(path)) && clear && claude"
@@ -77,31 +118,106 @@ func openClaudeHere() {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { makeTerminalFullScreen() }
 }
 
+// MARK: - 2. Screenshot → Claude
+
+/// Brings the most recently used Terminal tab that's running `claude` to the front.
+let focusClaudeScript = """
+tell application "Terminal"
+  repeat with w in windows
+    if (processes of (selected tab of w)) contains "claude" then
+      set index of w to 1
+      activate
+      return "ok"
+    end if
+  end repeat
+  repeat with w in windows
+    repeat with t in tabs of w
+      if (processes of t) contains "claude" then
+        set selected of t to true
+        set index of w to 1
+        activate
+        return "ok"
+      end if
+    end repeat
+  end repeat
+  return "none"
+end tell
+"""
+
+var shotInProgress = false
+
+func screenshotToClaude() {
+    guard !shotInProgress else { return }
+    // Screen Recording permission: macOS only applies it to a freshly started app,
+    // so after asking we quit and launchd starts us again.
+    if !CGPreflightScreenCaptureAccess() {
+        log("asking for Screen Recording permission")
+        _ = CGRequestScreenCaptureAccess()
+        alert("Allow Screen Recording for ClaudeHere",
+              "System Settings → Privacy & Security → Screen Recording → turn on ClaudeHere.\n\nClaudeHere will restart itself — then double-tap Right ⌘ again.")
+        exit(0)
+    }
+    shotInProgress = true
+    let file = NSTemporaryDirectory() + "claudehere-screenshot.png"
+    try? FileManager.default.removeItem(atPath: file)
+    DispatchQueue.global(qos: .userInitiated).async {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        p.arguments = ["-i", file]          // interactive: drag an area, Space for a window, Esc to cancel
+        try? p.run(); p.waitUntilExit()
+        DispatchQueue.main.async {
+            shotInProgress = false
+            guard let png = FileManager.default.contents(atPath: file), !png.isEmpty else { log("screenshot cancelled"); return }
+            try? FileManager.default.removeItem(atPath: file)
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setData(png, forType: .png)
+            guard terminalRunning(), runAppleScript(focusClaudeScript) == "ok" else {
+                log("screenshot taken, but no Claude session found")
+                alert("No Claude session open",
+                      "Your screenshot is on the clipboard. Open Claude in Terminal (double-tap ⌥ in Finder) and press Control-V to paste it.")
+                return
+            }
+            pasteWhenTerminalIsFront()
+        }
+    }
+}
+
+/// Waits until Terminal is actually frontmost (switching to a full-screen Space takes a moment), then presses ⌃V,
+/// which is Claude Code's "paste image" shortcut.
+func pasteWhenTerminalIsFront(attempt: Int = 0) {
+    if frontBundleID() != "com.apple.Terminal" {
+        if attempt < 30 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { pasteWhenTerminalIsFront(attempt: attempt + 1) } }
+        else { log("Terminal never came to the front; screenshot left on clipboard") }
+        return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        let vKey: CGKeyCode = 9
+        let src = CGEventSource(stateID: .hidSystemState)
+        for down in [true, false] {
+            let e = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: down)
+            e?.flags = .maskControl
+            e?.post(tap: .cghidEventTap)
+        }
+        log("screenshot pasted into Claude")
+    }
+}
+
+// MARK: - Key listening
+
 let callback: CGEventTapCallBack = { _, type, event, _ in
     switch type {
     case .tapDisabledByTimeout, .tapDisabledByUserInput:
         if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
     case .keyDown:
-        otherKeyPressed = true   // key used as a modifier (e.g. ⌥+letter), not a tap
+        triggers.forEach { if $0.isDown { $0.otherKeyPressed = true } }
     case .flagsChanged:
-        guard triggerKeyCodes.contains(event.getIntegerValueField(.keyboardEventKeycode)) else { break }
-        let pressed = event.flags.contains(triggerFlag)
-        if pressed && !keyIsDown {
-            keyIsDown = true
-            otherKeyPressed = false
-        } else if !pressed && keyIsDown {
-            keyIsDown = false
-            if otherKeyPressed { lastTap = 0; break }
-            let now = ProcessInfo.processInfo.systemUptime
-            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
-            if now - lastTap < doubleTapWindow {
-                lastTap = 0
-                log("double-tap detected (front app: \(front))")
-                if front == "com.apple.finder" { DispatchQueue.main.async { openClaudeHere() } }
-            } else {
-                lastTap = now
-            }
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        if modifierLogBudget > 0 {   // diagnostics: first few modifier keys (⌘⌥⌃⇧ only, never typed text)
+            modifierLogBudget -= 1
+            log("modifier key \(code) \(event.flags.contains(.maskCommand) ? "⌘" : "")\(event.flags.contains(.maskAlternate) ? "⌥" : "")\(event.flags.contains(.maskControl) ? "⌃" : "")\(event.flags.contains(.maskShift) ? "⇧" : "")")
         }
+        triggers.forEach { $0.flagsChanged(code, event.flags) }
     default: break
     }
     return Unmanaged.passUnretained(event)
@@ -126,24 +242,44 @@ func startTap() {
     guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                       options: .listenOnly, eventsOfInterest: CGEventMask(mask),
                                       callback: callback, userInfo: nil) else {
-        // No permission yet — keep retrying until the user grants it.
-        if !loggedWaiting {
-            loggedWaiting = true
-            log("waiting for permission (accessibility=\(AXIsProcessTrusted()), inputMonitoring=\(CGPreflightListenEventAccess()))")
-        }
+        log("couldn't create key listener; retrying")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { startTap() }
         return
     }
     eventTap = tap
     CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
     CGEvent.tapEnable(tap: tap, enable: true)
-    log("listening for double-tap ⌥ (accessibility=\(AXIsProcessTrusted()), inputMonitoring=\(CGPreflightListenEventAccess()))")
+    log("listening: double-tap ⌥ in Finder = open Claude, double-tap Right ⌘ = screenshot → Claude (screenRecording=\(CGPreflightScreenCaptureAccess()))")
 }
+
+triggers = [
+    DoubleTap("⌥ → open Claude here", openKeys, openFlag, openClaudeHere),
+    DoubleTap("Right ⌘ → screenshot to Claude", shotKeys, shotFlag, screenshotToClaude),
+]
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)   // no Dock icon, no menu bar
+
+// Only one copy may run. System Settings' "Quit & Reopen" (after granting a permission) starts an extra copy
+// next to the one launchd keeps alive — the launchd copy wins, any other copy quits.
+func enforceSingleInstance() {
+    let me = ProcessInfo.processInfo.processIdentifier
+    let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+        .filter { $0.processIdentifier != me }
+    guard !others.isEmpty else { return }
+    if ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == "com.local.claudehere" {
+        others.forEach { _ = $0.forceTerminate() }
+        log("stopped \(others.count) extra copy")
+    } else {
+        log("another copy is already running; quitting")
+        exit(0)
+    }
+}
+enforceSingleInstance()
+DispatchQueue.main.asyncAfter(deadline: .now() + 3) { enforceSingleInstance() }  // catch copies that started at the same moment
 log("started")
-// Ask for both permissions macOS needs: Input Monitoring (see keys) + Accessibility (full screen)
+// Permissions: Input Monitoring (see the double-taps) + Accessibility (full screen, paste).
+// Screen Recording is requested the first time you take a screenshot.
 if !CGPreflightListenEventAccess() { _ = CGRequestListenEventAccess() }
 _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
 startTap()
