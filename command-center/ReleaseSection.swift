@@ -76,7 +76,7 @@ func scanReleaseApps() -> [ReleaseApp] {
                                         : [dir.appendingPathComponent("app/src"), androidDir.appendingPathComponent("app/build.gradle")]
                 stale = sources.contains { fm.fileExists(atPath: $0.path) && sizeAndNewest($0).1 > built.addingTimeInterval(60) }
             }
-            // Your own nicknames win: defaults write com.local.commandcenter releaseNames -dict swap '"SnailPost (Dearly)"'
+            // Your own nicknames win: defaults write com.local.commandcenter releaseNames -dict myfolder '"My App"'
             let nick = (UserDefaults.standard.dictionary(forKey: "releaseNames") as? [String: String])?[dir.lastPathComponent]
             out.append(ReleaseApp(folder: dir, androidDir: androidDir, label: nick ?? appLabel(androidDir: androidDir, fallback: dir.lastPathComponent),
                                   appId: appId, versionName: vName, build: vCode, isFlutter: isFlutter,
