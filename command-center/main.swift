@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let drive = DriveSection()
     let phone = PhoneSection()
     let cleaner = CleanerSection()
+    let release = ReleaseSection()
     var cleanerRow: NSMenuItem?
     var flashing = false
 
@@ -27,8 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Drag files onto the icon → move/copy to the T7
         status.button?.window?.registerForDraggedTypes([.fileURL])
         status.button?.window?.delegate = self
-        apps.hub = self; drive.hub = self; phone.hub = self; cleaner.hub = self
-        apps.start(); drive.start(); phone.start()
+        apps.hub = self; drive.hub = self; phone.hub = self; cleaner.hub = self; release.hub = self
+        apps.start(); drive.start(); phone.start(); release.start()
         registerHotKey(10, key: 49 /* Space */) { [weak self] in self?.status.button?.performClick(nil) }
         if Bundle.main.bundleIdentifier != nil && !UserDefaults.standard.bool(forKey: "loginSetupDone") {
             try? SMAppService.mainApp.register()
@@ -55,12 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func updateStatus() {
         guard let b = status.button, !flashing else { return }
-        let symbol = drive.busy != nil ? "arrow.triangle.2.circlepath"
+        let symbol = (drive.busy != nil || release.busy != nil) ? "arrow.triangle.2.circlepath"
                    : apps.anyCrashed ? "exclamationmark.triangle.fill" : "command.square.fill"
         b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Command Center")
         b.image?.isTemplate = true
         b.imagePosition = .imageLeading
-        let t = drive.titleText()
+        let t = release.busy ?? drive.titleText()
         b.title = t.isEmpty ? "" : " " + t
     }
 
@@ -81,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard m === menu else { return }
         rebuild()
         apps.refreshProjects()
+        release.refresh()
     }
 
     @discardableResult
@@ -114,9 +116,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         c.submenu = cleaner.menu
         cleanerRow = c
 
+        let rel = add(menu, "Release Desk — Android builds", nil, symbol: "shippingbox.fill")
+        rel.isEnabled = true
+        let rsub = NSMenu(); rsub.autoenablesItems = false
+        release.buildMenu(rsub, withShortcuts: false)
+        rel.submenu = rsub
+
         apps.buildExtras(menu)
 
         menu.addItem(.separator())
+        let keys = add(menu, "Keyboard Shortcuts", nil, symbol: "keyboard")
+        keys.isEnabled = true
+        keys.submenu = shortcutsMenu()
         add(menu, "Check Everything…", #selector(healthCheck), symbol: "stethoscope")
         add(menu, "Update All", #selector(updateAll), symbol: "arrow.down.circle")
         let settings = add(menu, "Settings", nil, symbol: "gearshape")
@@ -128,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         add(st, "Open Logs Folder", #selector(openLogs), symbol: "doc.text")
         st.addItem(.separator())
-        add(st, "⌃⌥Space opens this menu · ⌃⌥M/C move/copy to T7 · ⌃⌥E eject", nil)
+        add(st, "⌃⌥Space opens this menu · Left ⌃⌃ opens Release Desk", nil)
         settings.submenu = st
         menu.addItem(NSMenuItem(title: "Quit Command Center", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -259,6 +270,12 @@ if args.contains("--dump") {
     for l in devListeners(hidden: []) { print("port", l.port, l.command, l.pid, tildify(l.cwd)) }
     print("drives:", externalDrives().map { "\($0.name) [\($0.model)]" })
     print("iPhone key set:", !secretKey.isEmpty, "· cache items:", cacheItems.count)
+    exit(0)
+}
+if args.contains("--release") {
+    for a in scanReleaseApps() {
+        print("\(a.label) [\(a.folder.lastPathComponent)] \(a.versionName) (\(a.build)) \(a.appId) aab:\(a.aab.map { tildify($0.path) } ?? "none") stale:\(a.codeChangedAfterBuild) ipa:\(a.ipa != nil)")
+    }
     exit(0)
 }
 if args.contains("--make-shortcuts") {

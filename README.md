@@ -5,7 +5,7 @@ Two dependency-free macOS utilities for developers, written in plain Swift using
 | | Tool | What it does |
 |---|---|---|
 | <img src="assets/claude-here-icon.png" width="80"> | **[ClaudeHere](claude-here/)** | Invisible double-tap shortcuts: open [Claude Code](https://claude.com/claude-code) in a Finder folder, screenshot straight into Claude, copy to your SSD, AirDrop to your iPhone. |
-| <img src="assets/command-center-icon.png" width="80"> | **[Command Center](command-center/)** | One menu-bar icon for everything else: your local dashboards & recent Claude projects, your external SSD (T7), clipboard sync with your iPhone, dev-cache cleaning, one-click updates and a health check. |
+| <img src="assets/command-center-icon.png" width="80"> | **[Command Center](command-center/)** | One menu-bar icon for everything else: your local dashboards & recent Claude projects, Android release builds, your external SSD (T7), clipboard sync with your iPhone, dev-cache cleaning, a shortcuts cheat sheet, one-click updates and a health check. |
 
 Both start at login and use essentially zero CPU/battery while idle.
 
@@ -38,6 +38,7 @@ After that, **Command Center › Update All** pulls and rebuilds both tools — 
 | **Right ⌘** | Anywhere | Drag over the screen → the screenshot is pasted into your open Claude Code session (Space = window, Esc = cancel) |
 | **Right ⇧** | Finder | Command Center copies the selection to your external SSD (re-copying updates it) |
 | **Left ⇧** | Finder | AirDrops the selection straight to your iPhone — no picker clicks |
+| **Left ⌃** | Anywhere | Opens Command Center's **Release Desk** (your Android builds) at the mouse |
 
 Taps are ignored when the key is used as a modifier (⌘C, ⇧A…). Finder-only shortcuts never fire in other apps.
 
@@ -87,6 +88,13 @@ Live progress shows in the menu bar. The drive is safely unmounted when the Mac 
 Copy on the iPhone → **double-tap the back** → it's on the Mac clipboard. Copy on the Mac (text, image, or a file in Finder) → **triple-tap the back** → it's on the iPhone.
 
 *iPhone Bridge › Set Up iPhone Shortcuts…* generates and signs the two Shortcuts for you; then on the iPhone: *Settings › Accessibility › Touch › Back Tap*. Works over the same Wi-Fi (or the iPhone's hotspot), protected by a secret key. Includes **Fix Universal Clipboard** (restarts Apple's Handoff service).
+
+### Release Desk — your Android builds (Left ⌃⌃)
+Finds every Flutter / Android project in `~/Flutter applications` and `~/AndroidStudioProjects`, with the app's real name (from `android:label`), version, and newest release `.aab`.
+- **Build Release** — `flutter build appbundle` / `./gradlew bundleRelease` in the background, sound when done.
+- **Get Ready to Upload** — copies the build to `~/Desktop/Ready to Upload/AppName 1.2.1 (113).aab`, selects it in Finder and opens Play Console.
+- Warns when the build is **older than your code**, or the **build number was already used**.
+- Nicknames: `defaults write com.local.commandcenter releaseNames -dict myfolder '"My App"'`
 
 ### Clean Dev Caches
 Shows and clears only rebuildable caches: Xcode DerivedData & caches, CoreSimulator caches, iOS DeviceSupport, CocoaPods, Gradle caches/wrappers/daemon logs, Android & Android Studio caches, npm, Flutter/Dart hosted packages, Homebrew, pip, Yarn, node-gyp. **Never touches** projects, Archives, simulators, emulators, SDKs, `~/.cache` (often ML models) or browser caches. Asks you to quit Xcode/Android Studio first.

@@ -4,6 +4,7 @@
 //                                        your open Claude Code session (Terminal)
 //   • Double-tap Right ⇧ Shift in Finder → Command Center copies the selected items to your external drive
 //   • Double-tap Left ⇧ Shift in Finder  → AirDrops the selected items straight to your iPhone
+//   • Double-tap Left ⌃ Control anywhere → Command Center's Release Desk (your Android builds) pops up
 // Pure macOS frameworks, no third-party dependencies.
 
 import Cocoa
@@ -20,6 +21,8 @@ let copyKeys: Set<Int64> = [60]               // Right Shift
 let copyFlag: CGEventFlags = .maskShift
 let dropKeys: Set<Int64> = [56]               // Left Shift
 let dropFlag: CGEventFlags = .maskShift
+let releaseKeys: Set<Int64> = [59]            // Left Control
+let releaseFlag: CGEventFlags = .maskControl
 // ------------------
 
 final class DoubleTap {
@@ -222,6 +225,16 @@ func quickCopyToT7() {
     log("Quick Copy: asked Command Center to copy the Finder selection")
 }
 
+// MARK: - 5. Release Desk (shown by Command Center)
+
+func openReleaseDesk() {
+    guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.local.commandcenter").isEmpty else {
+        log("Release Desk: Command Center isn't running"); NSSound.beep(); return
+    }
+    DistributedNotificationCenter.default().postNotificationName(Notification.Name("com.local.commandcenter.releaseMenu"),
+                                                                 object: nil, userInfo: nil, deliverImmediately: true)
+}
+
 // MARK: - 4. AirDrop the Finder selection to your iPhone
 
 let finderSelectionScript = """
@@ -380,7 +393,7 @@ func startTap() {
     eventTap = tap
     CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
     CGEvent.tapEnable(tap: tap, enable: true)
-    log("listening: ⌥⌥ in Finder = open Claude, Right ⌘⌘ = screenshot → Claude, Right ⇧⇧ in Finder = copy to T7, Left ⇧⇧ in Finder = AirDrop to iPhone (screenRecording=\(CGPreflightScreenCaptureAccess()))")
+    log("listening: ⌥⌥ in Finder = open Claude, Right ⌘⌘ = screenshot → Claude, Right ⇧⇧ in Finder = copy to T7, Left ⇧⇧ in Finder = AirDrop to iPhone, Left ⌃⌃ = Release Desk (screenRecording=\(CGPreflightScreenCaptureAccess()))")
 }
 
 triggers = [
@@ -388,6 +401,7 @@ triggers = [
     DoubleTap("Right ⌘ → screenshot to Claude", shotKeys, shotFlag, screenshotToClaude),
     DoubleTap("Right ⇧ in Finder → copy to T7", copyKeys, copyFlag, quickCopyToT7),
     DoubleTap("Left ⇧ in Finder → AirDrop to iPhone", dropKeys, dropFlag, airDropToIPhone),
+    DoubleTap("Left ⌃ → Release Desk", releaseKeys, releaseFlag, openReleaseDesk),
 ]
 
 let app = NSApplication.shared

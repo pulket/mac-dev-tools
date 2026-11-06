@@ -17,7 +17,7 @@ pkill -x CommandCenter 2>/dev/null || true
 sleep 0.5
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -swift-version 5 Shared.swift AppsSection.swift DriveSection.swift PhoneSection.swift CleanerSection.swift main.swift \
+swiftc -O -swift-version 5 Shared.swift AppsSection.swift DriveSection.swift PhoneSection.swift CleanerSection.swift ReleaseSection.swift main.swift \
   -o "$APP/Contents/MacOS/CommandCenter"
 
 ICONSET="$(mktemp -d)/AppIcon.iconset"; mkdir -p "$ICONSET"
